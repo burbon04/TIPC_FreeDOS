@@ -1,4 +1,12 @@
 # TIPC_FreeDOS
 FreeDOS port for the Texas Instruments Professional Computer
 
-I'm currently preparing the code to be pushed here, based on the 20260823 version
+## kernel-source
+
+this is the initial commit to my public repo, code based on rel. 20260823 
+(which is based on the 2042 version of the FreeDOS kernel)
+
+more detailed descriptions will follow, as they are still in progress
+
+
+
