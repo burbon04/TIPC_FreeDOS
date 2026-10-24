@@ -1328,9 +1328,6 @@ long rwblock(COUNT fd, VOID FAR * buffer, UCOUNT count, int mode)
 
       sectors_to_xfer = min(sectors_to_xfer, sectors_wanted);
 
-      /* TODO force single sector for now, multi-sector was problematic  */
-      sectors_wanted = 1;
-      sectors_to_xfer = 1;
 
       fnp->f_offset += sectors_to_xfer * secsize;
 

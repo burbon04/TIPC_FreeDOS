@@ -42,16 +42,236 @@ segment HMA_TEXT
 
 		global	FL_RESET
 FL_RESET:
-                call    tipc_counter_install    ; TIPC "media-changed" timer
-		pop	ax		; return address
-		pop	dx		; drive (DL only)
-		push	ax		; restore address
-		mov	ah,0		; BIOS reset diskette & fixed disk
-		int	4Dh
+		pop	ax		
+		pop	dx	
+		push	ax		
 
-		sbb	ax,ax		; carry set indicates error, AX=-CF={-1,0}
-		inc	ax		; ...return TRUE (1) on success,
-		ret			; else FALSE (0) on failure
+                ; TIPC ROM disk reset - instead of IBM BIOS reset
+                ; invalidates the ROM's position cache as well
+		mov	ah,0
+		int	4Dh
+                jc      .fail
+
+                ; check if floppy drive no., in case we ware called wrong
+                and     dl,7fh
+                cmp     dl,4
+                jae     .ok
+
+                ; state per drive:
+                ;   0 = not checked yet
+                ;   1 = known present
+                ;   2 = checked, but TRACK0 was never reached -> absent/faulty
+                ;
+                ; TIPC ROM POST needs to reach cyl 0 on the drive, but only
+                ; loops over 86 steps. That's not enough for >100 track virtual
+                ; Flashfloppy disks, so the drive might be skipped.
+                ; So try to re-init once from within the FreeDOS kernel
+                ;
+                ; Unlike POST DRVTST (86 attempts), allow 223 outward steps
+                ; so an extended-geometry access can always return to TRACK 0.
+                push    bx
+                push    ds
+                mov     ax,[cs:_DGROUP_]
+                mov     ds,ax
+                xor     dh,dh
+                mov     bx,dx
+                mov     al,[tipc_drive_probe_state+bx]
+                pop     ds
+                pop     bx
+                cmp     al,1
+                je      .ok
+                cmp     al,2
+                je      .fail
+
+                ; TRACK 0 is checked before the first step and after every step.
+                pushf
+                cli
+                push    bx
+                push    cx
+                push    si
+                push    di
+                push    bp
+                push    es
+
+                mov     bp,dx           ; requested unit
+                ; INT 48h/AH=09h -> ES:BX = ROMDAT:SYSCON (offset 0003h).
+                mov     ah,09h
+                int     48h
+                cli                     ; BEEPIO enables interrupts internally
+                mov     di,bx           ; keep SYSCON offset
+
+                ; If POST already marked this drive installed in SYSCON,
+                ; remember it as present and skip the extended recovery.
+                mov     bx,bp
+                and     bx,3
+                mov     al,[cs:tipc_drive_bit_table+bx]
+                test    byte [es:di],al
+                jz      .need_extended_probe
+
+                push    ax
+                push    bx
+                push    ds
+                mov     ax,[cs:_DGROUP_]
+                mov     ds,ax
+                mov     bx,bp
+                and     bx,3
+                mov     byte [tipc_drive_probe_state+bx],1
+                pop     ds
+                pop     bx
+                pop     ax
+                mov     si,1
+                jmp     .leave_no_hw_change
+
+.need_extended_probe:
+                ; the probes are derived (mostly copied ;) from SYS ROM
+                mov     ch,[es:di-3]
+                mov     cl,[es:di-1]
+                mov     al,ch
+                and     al,3fh
+                or      al,80h
+                mov     [es:di-3],al
+                out     00h,al
+
+                mov     bx,bp
+                and     bx,3
+                mov     al,cl
+                and     al,0f0h
+                or      al,[cs:tipc_drvsel_table+bx]
+                mov     [es:di-1],al
+                out     04h,al
+
+                ; SYS ROM moves to cyl 4, then tries to get back to 0
+                ; just do the same here
+                xor     al,al
+                out     21h,al          
+                mov     al,4
+                out     23h,al          
+                mov     al,10h          
+                out     20h,al
+
+.seek4_wait:
+                mov     bx,10
+.seek4_delay:
+                dec     bx
+                jnz     .seek4_delay
+                in      al,20h
+                test    al,01h          
+                jnz     .seek4_wait
+                mov     al,0d0h
+                out     20h,al
+                mov     bx,10
+.pre_status_delay:
+                dec     bx
+                jnz     .pre_status_delay
+                in      al,20h
+                test    al,04h
+                jnz     .home_ok
+                ; more than 200 cyl is already unstable on TIPC, as the
+                ; time needed to go back to 0 is aleady considered timed out
+                ; anyway, it's cheap here
+                mov     si,223   
+.home_step:
+                mov     al,061h
+                out     20h,al
+.wait_step:
+                mov     bx,10
+.step_delay:
+                dec     bx
+                jnz     .step_delay
+                in      al,20h
+                test    al,01h
+                jnz     .wait_step
+                mov     al,0d0h
+                out     20h,al
+                mov     bx,10
+.track0_delay:
+                dec     bx
+                jnz     .track0_delay
+                in      al,20h
+                test    al,04h
+                jnz     .home_ok
+                dec     si
+                jnz     .home_step
+
+                ; cyl 0 not reached, give up and remember
+                push    ax
+                push    bx
+                push    ds
+                mov     ax,[cs:_DGROUP_]
+                mov     ds,ax
+                mov     bx,bp
+                and     bx,3
+                mov     byte [tipc_drive_probe_state+bx],2
+                pop     ds
+                pop     bx
+                pop     ax
+
+                xor     si,si
+                jmp     short .restore_latches
+
+.home_ok:
+                ; looks good, enable drive
+                ; again, same as SYS ROM code does
+                push    ax
+                push    bx
+                push    ds
+                mov     ax,[cs:_DGROUP_]
+                mov     ds,ax
+                mov     bx,bp
+                and     bx,3
+                mov     byte [tipc_drive_probe_state+bx],1
+                mov     al,[cs:tipc_drive_bit_table+bx]
+                or      byte [es:di],al
+                pop     ds
+                pop     bx
+                pop     ax
+
+                mov     si,1
+
+.leave_no_hw_change:
+                mov     ax,si
+                pop     es
+                pop     bp
+                pop     di
+                pop     si
+                pop     cx
+                pop     bx
+                popf
+                ret
+
+.restore_latches:
+                ; restore latches
+                mov     al,cl
+                mov     [es:di-1],al
+                out     04h,al
+                mov     al,ch
+                mov     [es:di-3],al
+                out     00h,al
+
+                mov     ax,si
+                pop     es
+                pop     bp
+                pop     di
+                pop     si
+                pop     cx
+                pop     bx
+                popf
+                ret
+
+.ok:
+                mov     ax,1
+                ret
+
+.fail:
+                xor     ax,ax
+                ret
+
+tipc_drvsel_table:
+                db      03eh,03dh,04bh,087h
+tipc_drive_bit_table:
+                db      01h,02h,04h,08h
+
+
 
 ;
 ; COUNT ASMPASCAL fl_diskchanged(WORD drive);
@@ -91,114 +311,6 @@ fl_dc:	cbw		          	; extend AL into AX, AX={1,0,-1}
 ;
 ; Returns 0 if successful, error code otherwise.
 ;
-
-TIPC_COUNTER_INIT equ 1Eh    ; time span for the timer, 1Eh is 3 seconds
-
-; status in return path:
-;   0 = M_DONT_KNOW = timer expired, reload BPB
-;   1 = M_NOT_CHANGED = treat disk as not changed
-; as TIPC does not use PIN 34 (RDY) signal that IBM systems used for "media changed" events
-;
-; we install the counter in INT 5Ah, to decrement every 100ms.
-; 
-
-       global  TIPC_MEDIA_CHECK
-TIPC_MEDIA_CHECK:
-        pop     ax              ; stored return address
-        pop     dx              ; stored drive
-        push    ax
-        push    bx
-        push    ds
-        call    tipc_counter_install ; install inline
-        mov     ax,[cs:_DGROUP_]
-        mov     ds,ax
-        and     dl,7fh
-        cmp     dl,4
-        jae     .unchanged
-        xor     dh,dh
-        mov     bx,dx
-        cmp     byte [tipc_kernel_counters+bx],0
-        jne     .unchanged
-        mov     byte [tipc_kernel_counters+bx],TIPC_COUNTER_INIT
-        xor     ax,ax           ; it's a M_DONT_KNOW
-        jmp     short .finish
-.unchanged:
-        mov     ax,1            ; it's a M_NOT_CHANGED
-.finish:
-        pop     ds
-        pop     bx
-        ret
-
-tipc_counter_install:           ; the lazy way - check this every time
-        cmp     byte [cs:tipc_counter_installed],0
-        jne     .finish         ; if already installed, skip installation and return
-        pushf                   ; otherwise, initial run - so hook existing INT 
-        cli
-        push    ax
-        push    bx
-        push    es
-        xor     ax,ax
-        mov     es,ax
-        mov     bx,[es:0168h]
-        mov     [cs:tipc_old_int5a],bx
-        mov     bx,[es:016Ah]
-        mov     [cs:tipc_old_int5a+2],bx
-        mov     word [es:0168h],tipc_counter_timer
-        mov     ax,cs
-        mov     word [es:016Ah],ax
-        mov     byte [cs:tipc_counter_installed],1
-        pop     es
-        pop     bx
-        pop     ax
-        popf
-.finish:
-        ret
-
-tipc_counter_activity:
-        push    ax
-        push    bx
-        push    dx
-        push    ds
-        call    tipc_counter_install
-        mov     ax,[cs:_DGROUP_]
-        mov     ds,ax
-        mov     dl,[bp+10h]
-        and     dl,7fh
-        cmp     dl,4
-        jae     .finish
-        xor     dh,dh
-        mov     bx,dx
-        mov     byte [tipc_kernel_counters+bx],TIPC_COUNTER_INIT
-.finish:
-        pop     ds
-        pop     dx
-        pop     bx
-        pop     ax
-        ret
-
-tipc_counter_timer:
-        push    ax
-        push    bx
-        push    ds
-        mov     ax,[cs:_DGROUP_]
-        mov     ds,ax
-        xor     bx,bx
-.looper:
-        cmp     byte [tipc_kernel_counters+bx],0
-        je      .next
-        dec     byte [tipc_kernel_counters+bx]
-.next:
-        inc     bx
-        cmp     bx,4
-        jb      .looper
-        pop     ds
-        pop     bx
-        pop     ax
-        jmp     far [cs:tipc_old_int5a]   ; call the previous owner
-
-tipc_counter_installed: db 0         
-tipc_old_int5a:         dw 0,0
-
 
         ; TIPC uses DITs to install the parameter block        
         ; ( WORD drive, WORD bytes_per_sector,
@@ -334,22 +446,18 @@ fl_common:
                 ror     cl,1            ; ...to bits 6-7 in CL
                 or      cl,[bp+0Ah]	; or in the sector number (bits 0-5)
 
-                mov     al,1            ; TODO TIPC: single sector for now
+                mov     al,[bp+08h]     ; sector count from FreeDOS 
                 les     bx,[bp+04h]     ; Load 32 bit buffer ptr into ES:BX
 
                 mov     dl,[bp+10h]     ; drive (if or'ed 80h its a hard drive)
                 mov     dh,[bp+0Eh]     ; get the head number
 
-                ; Hit the media timer button 
-                call    tipc_counter_activity
                 int     4Dh             ; process sectors
 
 		sbb	al,al		; carry: al=ff, else al=0
 		and	al,ah		; carry: error code, else 0
                 or      al,al
                 jnz     fl_error
-                ; media timer button once again
-                call    tipc_counter_activity
 fl_error:
                 mov     ah,0            ; extend AL into AX without sign extension
                 pop     bp
@@ -449,6 +557,7 @@ segment _FIXED_DATA                  ; global vars need FIXED_DATA, otherwise ac
 global TIPC_KERNEL_DITS              ; is unreliable and causes weird behaviour
 TIPC_KERNEL_DITS:
         times 44 db 0
-tipc_kernel_counters:   db 0,0,0,0
+tipc_kernel_counters:     db 0,0,0,0
+tipc_drive_probe_state:   db 0,0,0,0  
 
 

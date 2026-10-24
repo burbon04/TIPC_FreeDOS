@@ -40,5 +40,5 @@
 #define OEM_ID          0xfd    /* FreeDOS, returned in BH by int 21 30 */
 
 /* TIPC custom banner */
-#define KERNEL_VERSION_STRING "FreeDOS/TIPC kernel - based on 2042, rel. 20260823-UPX\n"
+#define KERNEL_VERSION_STRING "FreeDOS/TIPC kernel - based on 2042, rel. 20261024-UPX\n"
 

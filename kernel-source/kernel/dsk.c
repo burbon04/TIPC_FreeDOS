@@ -44,12 +44,6 @@ static BYTE *dskRcsId =
 BOOL ASMPASCAL fl_reset(WORD);
 COUNT ASMPASCAL fl_diskchanged(WORD);
 
-/* TIPC has a special way of detecting changed media                     */
-/* there is no "media changed" line, instead a count down timer          */
-/* is used to forget the media status after 2 seconds in TIPC MS-DOS 2.x */
-/* as we will support larger disks, we'll use 3 seconds instead          */
-/* TODO - might need some further fine-tuning                            */
-COUNT ASMPASCAL tipc_media_check(WORD);
 
 COUNT ASMPASCAL fl_format(WORD, WORD, WORD, WORD, WORD, UBYTE FAR *);
 COUNT ASMPASCAL fl_read(WORD, WORD, WORD, WORD, WORD, UBYTE FAR *);
@@ -65,7 +59,6 @@ UWORD ASMPASCAL floppy_change(UWORD);
 #ifdef __WATCOMC__
 #pragma aux (pascal) fl_reset modify exact [ax dx]
 #pragma aux (pascal) fl_diskchanged modify exact [ax dx]
-#pragma aux (pascal) tipc_media_check modify exact [ax dx]     /* TIPC port */
 #pragma aux (pascal) fl_setdisktype modify exact [ax bx dx]
 #pragma aux (pascal) fl_readkey modify exact [ax]
 #pragma aux (pascal) fl_lba_ReadWrite modify exact [ax dx]
@@ -113,10 +106,21 @@ STATIC VOID tmark(ddt *pddt)
   pddt->ddt_fh.ddt_lasttime = ReadPCClock();
 }
 
-//STATIC BOOL tdelay(ddt *pddt, ULONG ticks)
-//{
-//  return ReadPCClock() - pddt->ddt_fh.ddt_lasttime >= ticks;
-//}
+/* TIPC ReadPCClock() returns a daily counter (approximately 18 Hz).
+ * Handle its midnight wrap explicitly instead of unsigned underflow.
+ */
+#define TIPC_TICKS_PER_DAY 1555200ul  /* 24 * 60 * 60 * 18 */
+
+STATIC BOOL tdelay(ddt *pddt, ULONG ticks)
+{
+  ULONG last = pddt->ddt_fh.ddt_lasttime;
+
+  if (last == 0xfffffffful)     
+    return TRUE;
+
+  return (ULONG)(ReadPCClock() - last) >= ticks;
+ 
+}
 
 #define N_PART 4                /* number of partitions per
                                    table partition              */
@@ -241,7 +245,6 @@ STATIC WORD play_dj(ddt * pddt)
 
 STATIC WORD diskchange(ddt * pddt)
 {
-  //COUNT result;
 
   /* if it's a hard drive, media never changes */
   if (hd(pddt->ddt_descflags))
@@ -250,21 +253,10 @@ STATIC WORD diskchange(ddt * pddt)
   if (play_dj(pddt) == M_CHANGED)
     return M_CHANGED;
 
-  /* this is the TIPC INT 5Ah countdown to decide on changed media */
-  return tipc_media_check(pddt->ddt_driveno);
-
-  
- // if (pddt->ddt_descflags & DF_CHANGELINE)      /* if we can detect a change ... */
- // {
- //   if ((result = fl_diskchanged(pddt->ddt_driveno)) == 1)
- //     /* check if it has changed... */
- //     return M_CHANGED;
- //   else if (result == 0)
- //     return M_NOT_CHANGED;
- // }
-
- // /* can not detect or error... */
- // return tdelay(pddt, 37ul) ? M_DONT_KNOW : M_NOT_CHANGED; 
+  /* No reliable change line on TIPC floppy drives: use FreeDOS' native
+   * two-second heuristic, measured since the last block I/O activity.
+   */
+  return tdelay(pddt, 37ul) ? M_DONT_KNOW : M_NOT_CHANGED;
 }
 
 STATIC WORD mediachk(rqptr rp, ddt * pddt)
@@ -1108,10 +1100,6 @@ STATIC int LBA_Transfer(ddt * pddt, UWORD mode, VOID FAR * buffer,
       transfer_address = buffer;
     }
 
-    /* TIPC floppy I/O: one sector per request for now,
-     * as multi-sector was unstable // TODO. */
-    if (!hd(pddt->ddt_descflags))
-      count = 1;
 
     for (num_retries = 0; num_retries < N_RETRY; num_retries++)
     {
